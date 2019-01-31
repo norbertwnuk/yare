@@ -24,21 +24,138 @@
 
 package com.sabre.oss.yare.example;
 
+import com.google.common.collect.ImmutableList;
 import com.sabre.oss.yare.core.RuleSession;
 import com.sabre.oss.yare.core.RulesEngine;
 import com.sabre.oss.yare.core.RulesEngineBuilder;
 import com.sabre.oss.yare.core.model.Rule;
 import com.sabre.oss.yare.dsl.RuleDsl;
 import com.sabre.oss.yare.engine.executor.DefaultRulesExecutorBuilder;
+import org.immutables.value.Value;
 import org.junit.jupiter.api.Test;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.stream.IntStream;
 
-import static com.sabre.oss.yare.dsl.RuleDsl.*;
+import static com.sabre.oss.yare.dsl.RuleDsl.and;
+import static com.sabre.oss.yare.dsl.RuleDsl.castToCollection;
+import static com.sabre.oss.yare.dsl.RuleDsl.contains;
+import static com.sabre.oss.yare.dsl.RuleDsl.containsAny;
+import static com.sabre.oss.yare.dsl.RuleDsl.equal;
+import static com.sabre.oss.yare.dsl.RuleDsl.lessOrEqual;
+import static com.sabre.oss.yare.dsl.RuleDsl.not;
+import static com.sabre.oss.yare.dsl.RuleDsl.or;
+import static com.sabre.oss.yare.dsl.RuleDsl.param;
+import static com.sabre.oss.yare.dsl.RuleDsl.value;
+import static com.sabre.oss.yare.dsl.RuleDsl.values;
 import static com.sabre.oss.yare.invoker.java.MethodCallMetadata.method;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class AirlineMatchingTest {
+
+    @Value.Immutable
+    public static abstract class Itinerary {
+        public abstract String getPassenger();
+
+        public abstract List<ItineraryPart> getItineraryParts();
+    }
+
+    @Value.Immutable
+    public static abstract class ItineraryPart {
+        public abstract List<Flight> getFlights();
+
+        public int getDistance() {
+            return getFlights().stream().flatMapToInt(f -> IntStream.of(f.getDistance())).sum();
+        }
+    }
+
+    @Value.Immutable
+    public static abstract class Flight {
+        public abstract String getCarrier();
+
+        public abstract int getDepartureTime();
+
+        public abstract int getDistance();
+    }
+
+    @Test
+    void sample01() {
+        // given
+        List<Rule> rules = Collections.singletonList(RuleDsl.ruleBuilder()
+                .name("Sample01")
+                .fact("itinerary", ImmutableItinerary.class)
+                .fact("itineraryPart", ImmutableItineraryPart.class)
+                .fact("flight", ImmutableFlight.class)
+                .predicate(
+                        or(
+                                and(
+                                        equal(
+                                                value("${itinerary.passenger}"),
+                                                value("P1")
+                                        ),
+                                        lessOrEqual(
+                                                value("${itineraryPart.distance}"),
+                                                value(300)
+                                        ),
+                                        equal(
+                                                value("${flight.carrier}"),
+                                                value("A")
+                                        )
+                                ),
+                                equal(
+                                        value("${flight.departureTime}"),
+                                        value(5)
+                                )
+                        )
+                )
+                .action("collect",
+                        param("context", value("${ctx}")),
+                        param("fact", value("${flight}")))
+                .build());
+
+        List<Itinerary> itineraries = Arrays.asList(
+                ImmutableItinerary.builder().passenger("P1").addItineraryParts(
+                        ImmutableItineraryPart.builder().addFlights(
+                                ImmutableFlight.builder().carrier("A").departureTime(1).distance(100).build(),
+                                ImmutableFlight.builder().carrier("B").departureTime(2).distance(200).build()
+                        ).build(),
+                        ImmutableItineraryPart.builder().addFlights(
+                                ImmutableFlight.builder().carrier("C").departureTime(3).distance(300).build(),
+                                ImmutableFlight.builder().carrier("D").departureTime(4).distance(400).build()
+                        ).build()
+                ).build(),
+                ImmutableItinerary.builder().passenger("P2").addItineraryParts(
+                        ImmutableItineraryPart.builder().addFlights(
+                                ImmutableFlight.builder().carrier("E").departureTime(5).distance(500).build(),
+                                ImmutableFlight.builder().carrier("F").departureTime(6).distance(600).build()
+                        ).build()
+                ).build());
+
+        RulesEngine engine = new RulesEngineBuilder()
+                .withRulesRepository(i -> rules)
+                .withActionMapping("collect", method(new Actions(), (action) -> action.collect(null, null)))
+                .build();
+        RuleSession session = engine.createSession("test");
+        List<Flight> matching = new ArrayList<>();
+
+        itineraries.forEach(i -> {
+            i.getItineraryParts().forEach(ip -> {
+                ip.getFlights().forEach(f -> {
+                    session.execute(matching, ImmutableList.of(i, ip, f));
+                });
+            });
+        });
+
+        // then
+        assertThat(matching).containsExactly(
+                itineraries.get(0).getItineraryParts().get(0).getFlights().get(0),
+                itineraries.get(1).getItineraryParts().get(0).getFlights().get(0)
+        );
+    }
 
     @Test
     void shouldMatchWithSubsetOfAirlineCodes() {
